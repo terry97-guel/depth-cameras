@@ -1,0 +1,21 @@
+[global_config]
+  title_transmit_bg_color = "#000000"
+  title_receive_bg_color = "#000000"
+
+[keybindings]
+
+
+[layouts]
+  [[default]]
+    [[[window0]]]
+      type = Window
+      parent = ""
+
+
+[profiles]
+  [[default]]
+    use_system_font = False
+    font = Monospace 11
+    background_color = "#000000"
+    cursor_color = "#AAAAAA"
+
