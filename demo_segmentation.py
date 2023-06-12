@@ -11,8 +11,6 @@ from sensor_msgs.msg import Image
 from matplotlib import pyplot as plt
 from cv_bridge import CvBridge
 
-rospy.init_node("segmetation_demo")
-
 # %%
 # Load SAM model
 def show_mask(mask, ax, random_color=False):
@@ -47,36 +45,78 @@ predictor = SamPredictor(sam)
 
 
 # %%
-# Assert that rs2 node is activated!
-assert '/camera/realsense2_camera' in rosnode.get_node_names()
+import pyrealsense2 as rs
+import numpy as np
+import cv2
 
-topic_tuples = rostopic.get_topic_list()
-# (pub, sub)
-# pub/sub: (topic, msg, [nodes])
+# Configure depth and color streams
+pipeline = rs.pipeline()
+config = rs.config()
+config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
 
-topic_info = list(filter(lambda iterator: iterator[0]=='/camera/color/image_raw', topic_tuples[0]))[0]
+# Align Module
+align = rs.align(rs.stream.color)
 
-topic_info[0], topic_info[1], topic_info[2]
+# Create Filters
+spatial = rs.spatial_filter()
+temporal = rs.temporal_filter()
+hole_filling = rs.hole_filling_filter()
+depth_to_disparity = rs.disparity_transform(True)
+disparity_to_depth = rs.disparity_transform(False)
+
+colorizer = rs.colorizer()
+
+
+# Start streaming
+pipeline.start(config)
+
+profile = pipeline.get_active_profile()
+
+depth_profile = rs.video_stream_profile(profile.get_stream(rs.stream.depth))
+depth_intrinsics = depth_profile.get_intrinsics()
+
+
+try:
+    while True:
+        # Wait for a coherent pair of frames: color and depth
+        frames = pipeline.wait_for_frames()
+        aligned_frames = align.process(frames)
+        
+        color_frame = aligned_frames.get_color_frame()        
+        depth_frame = aligned_frames.get_depth_frame()
+
+        depth_frame = depth_to_disparity.process(depth_frame)
+        depth_frame = spatial.process(depth_frame)
+        depth_frame = temporal.process(depth_frame)
+        depth_frame = disparity_to_depth.process(depth_frame)
+        depth_frame = hole_filling.process(depth_frame)        
+        
+        # print(np.asanyarray(depth_frame.get_data()).shape)
+
+        
+        colorized_depth_frame = colorizer.colorize(depth_frame)
+        
+        # Display the color and depth images
+        color_image = np.asanyarray(color_frame.get_data())
+        depth_image = np.asanyarray(depth_frame.get_data()) * 0.001
+        colorized_depth_image = np.asanyarray(colorized_depth_frame.get_data())
+        cv2.imshow('Color Image', color_image)
+        cv2.imshow('Depth Image', colorized_depth_image)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+finally:
+    # Stop streaming
+    pipeline.stop()
+
+# Close all OpenCV windows
+cv2.destroyAllWindows()
+
+
 # %%
-from cv_bridge import CvBridge
-
-# Wait for the image message
-image_msg = rospy.wait_for_message(topic_info[0], Image, 3)
-
-# Convert the ROS Image message to a OpenCV image
-bridge = CvBridge()
-image = bridge.imgmsg_to_cv2(image_msg, desired_encoding="passthrough")
-
-# Plot the image
-plt.imshow(image)
-plt.axis("off")
-plt.show()
-
-
+image = color_image.copy()
 predictor.set_image(image)
-
-
-
 
 
 # %%
@@ -200,7 +240,6 @@ while True:
         cv2.destroyAllWindows()
         break
 
-# %%
 x, y = clicked_coord
 if x<w//2 and y<h//2:
     idx = 0
@@ -214,7 +253,8 @@ else: raise ValueError
 
 img = image.copy()
 mask_image = np.zeros_like(img)
-mask_image[masks[idx-1]] = [255, 144, 30]  # Set color of Mask
+target_mask = masks[idx-1]
+mask_image[target_mask] = [255, 144, 30]  # Set color of Mask
 opacity = 0.4 # Set the opacity of the mask
 overlay = cv2.addWeighted(img, 1-opacity, mask_image, opacity, 0)
 
@@ -227,201 +267,176 @@ while True:
         break
 
 # %%
-# Assert that rs2 node is activated!
-assert '/camera/realsense2_camera' in rosnode.get_node_names()
-
-topic_tuples = rostopic.get_topic_list()
-# (pub, sub)
-# pub/sub: (topic, msg, [nodes])
-
-topic_info = list(filter(lambda iterator: iterator[0]=='/camera/depth/color/points', topic_tuples[0]))[0]
-
-topic_info[0], topic_info[1], topic_info[2]
-
-# %%
-from cv_bridge import CvBridge
-from sensor_msgs.msg import PointCloud2
-
-# Wait for the image message
-pcl_msg = rospy.wait_for_message(topic_info[0], PointCloud2, 3)
-point_cloud_array = ros_numpy.point_cloud2.pointcloud2_to_array(pcl_msg)
-
-# Access the data in the NumPy array
-# (example: get the x, y, and z coordinates of the first point)
-x = point_cloud_array['x']
-y = point_cloud_array['y']
-z = point_cloud_array['z']
-
-# %%
-import pyrealsense2 as rs
-import numpy as np
-import cv2
-
-# Configure depth and color streams
-pipeline = rs.pipeline()
-config = rs.config()
-config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-
-# Enable temporal filtering
-temporal_filter = rs.temporal_filter()
-
-# Create alignment object
-align = rs.align(rs.stream.color)
-
-
-# Start streaming
-pipeline.start(config)
-
-try:
-    while True:
-        # Wait for a coherent pair of frames: color and depth
-        frames = pipeline.wait_for_frames()
-        
-        aligned_frames = align.process(frames)
-        
-        # Apply temporal filtering to the depth frame
-        filtered_frames = temporal_filter.process(frames)
-        color_frame = filtered_frames.get_color_frame()
-        depth_frame = filtered_frames.get_depth_frame()
-
-        # Convert color frame to numpy array
-        color_image = np.asanyarray(color_frame.get_data())
-
-        # Convert depth frame to numpy array
-        depth_image = np.asanyarray(depth_frame.get_data())
-
-        # Scale depth values for visualization
-        depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth_image, alpha=0.03), cv2.COLORMAP_JET)
-
-        # Display the color and depth images
-        cv2.imshow('Color Image', color_image)
-        cv2.imshow('Depth Image', depth_colormap)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-
-finally:
-    # Stop streaming
-    pipeline.stop()
-
-# Close all OpenCV windows
-cv2.destroyAllWindows()
-
-
-
-
-# %%
-# Compare the depth images before and after applying temporal filtering
-
-import pyrealsense2 as rs
-import numpy as np
-import cv2
-
-# Create a pipeline
-pipeline = rs.pipeline()
-
-# Configure the pipeline
-config = rs.config()
-config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-
-# Start the pipeline
-pipeline.start(config)
-
-# Create a temporal filter
-temporal_filter = rs.temporal_filter()
-
-
-
-filter_magnitude = rs.option.filter_magnitude
-filter_smooth_alpha = rs.option.filter_smooth_alpha
-filter_smooth_delta = rs.option.filter_smooth_delta
-
-temporal_smooth_alpha=1
-temporal_smooth_delta=1
-
-
-temporal_filter.set_option(filter_smooth_alpha, temporal_smooth_alpha)
-temporal_filter.set_option(filter_smooth_delta, temporal_smooth_delta)
+def depth2pcl(depth_img,fx,fy,cx,cy, mask=None):
+    """
+        Scaled depth image to pointcloud
+    """
     
-try:
-    while True:
-        # Wait for the next frame
-        frames = pipeline.wait_for_frames()
-        
-        # Apply temporal filtering to the depth frame
-        filtered_frames = temporal_filter.process(frames).as_frameset()
-        
-        # Get the depth frame
-        depth_frame = frames.get_depth_frame()
-        filtered_depth_frame = filtered_frames.get_depth_frame()
-        
-
-        depth_image = np.asanyarray(depth_frame.get_data())
-        filtered_depth_image = np.asanyarray(filtered_depth_frame.get_data())
-
-        # Scale depth values for visualization
-        depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth_image, alpha=0.20), cv2.COLORMAP_JET)
-        filtered_depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(filtered_depth_image, alpha=0.20), cv2.COLORMAP_JET)
-
-        # Display the color and depth images
-        cv2.imshow('Depth Image', depth_colormap)
-        cv2.imshow('Filtered Depth Image', filtered_depth_colormap)
-        
-        cv2.imshow("Differnce", cv2.absdiff(depth_colormap, filtered_depth_colormap))
-        
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            cv2.destroyAllWindows()
-            break
-        
-
-        # Continue with further processing using the filtered frame
-        # ...
-except Exception as e:
-    print(e)
-finally:
-    # Stop the pipeline
-    pipeline.stop()
-
+    height = depth_img.shape[0]
+    width = depth_img.shape[1]
+    indices = np.indices((height, width),dtype=np.float32).transpose(1,2,0)
+    z_e = depth_img
     
+    if mask is not None:
+        indices = indices[mask]
+        z_e = z_e[mask]
+        
+    x_e = (indices[..., 1] - cx) * z_e / fx
+    y_e = (indices[..., 0] - cy) * z_e / fy
+    
+    # Order of y_ e is reversed !
+    pcl = np.stack([z_e, -x_e, -y_e], axis=-1)
+    return pcl # [H x W x 3]
+
+pcl = depth2pcl(depth_image,
+                fx=depth_intrinsics.fx,
+                fy=depth_intrinsics.fy,
+                cx=depth_intrinsics.ppx,
+                cy=depth_intrinsics.ppy,
+                mask=None)
+pcl.shape
+
+pcl[mask].shape
+# %%
+depth_img = depth_image
+fx=depth_intrinsics.fx
+fy=depth_intrinsics.fy
+cx=depth_intrinsics.ppx
+cy=depth_intrinsics.ppy
+
+
+height = depth_img.shape[0]
+width = depth_img.shape[1]
+indices = np.indices((height, width),dtype=np.float32).transpose(1,2,0)[mask]
+
+z_e = depth_img[mask]
+x_e = (indices[..., 1] - cx) * z_e / fx
+y_e = (indices[..., 0] - cy) * z_e / fy
+
+# Order of y_ e is reversed !
+pcl = np.stack([z_e, -x_e, -y_e], axis=-1) # [H x W x 3] 
+pcl
+
 # %%
 
-import pyrealsense2 as rs
+import mujoco
+import numpy as np
+import matplotlib.pyplot as plt
+import sys
 
-# Create a pipeline
-pipeline = rs.pipeline()
+from model.mujoco_parser import MuJoCoParserClass
+from model.util import sample_xyzs,rpy2r,r2quat
+np.set_printoptions(precision=2,suppress=True,linewidth=100)
 
-# Configure the pipeline to stream depth frames
-config = rs.config()
-config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+plt.rc('xtick',labelsize=6); plt.rc('ytick',labelsize=6)
+print ("MuJoCo version:[%s]"%(mujoco.__version__))
 
-# Start the pipeline
-pipeline.start(config)
 
-import time
-time.sleep(1)
 
-for _ in range(10):
-    # Wait for a coherent pair of frames: depth and color
-    frames = pipeline.wait_for_frames()
-    depth_frame = frames.get_depth_frame()
+# %%
+from sensor_msgs.msg import JointState
+import actionlib
+from control_msgs.msg import *
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+import copy
 
-    # Get the depth scale for converting depth values
-    depth_scale = pipeline.get_active_profile().get_device().first_depth_sensor().get_depth_scale()
 
-    # Get the depth intrinsics
-    depth_intrinsics = depth_frame.profile.as_video_stream_profile().intrinsics
+class UR(object):
+    def __init__(self,):
+        self.JOINT_NAMES = ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint',
+                            'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint']
+        self.client      = None
+        
+   
+    def move_arm_speed(self, traj:JointTrajectory, speed_limit):
+        joint_pos1 = rospy.wait_for_message("joint_states", JointState).position
+        rospy.sleep(0.1)
+        joint_pos2 = rospy.wait_for_message("joint_states", JointState).position
 
-    # Deproject pixel (100, 100) to point
-    x = 100
-    y = 100
-    depth = depth_frame.get_distance(x, y)
-    point = rs.rs2_deproject_pixel_to_point(depth_intrinsics, [x, y], depth)
+        joint_pos1, joint_pos2 = np.array(joint_pos1), np.array(joint_pos2)
 
-    # Print the 3D coordinates
-    print("3D Coordinates (x, y, z):", point)
+        diff = np.linalg.norm(joint_pos2 - joint_pos1)
 
-    # Process the point cloud data here...
+        
+        if diff > 5e-3:            
+            raise Exception(f"Loose Connection, diff:{diff}")
+        assert np.linalg.norm(joint_pos2) < 20
 
-# Stop the pipeline
-pipeline.stop()
+        try: 
+            g = FollowJointTrajectoryGoal()
+            g.trajectory = copy.deepcopy(traj)
+            g.trajectory.joint_names = self.JOINT_NAMES
+            joint_states = rospy.wait_for_message("joint_states", JointState)
+            joints_pos   = joint_states.position
+
+            if np.linalg.norm(joints_pos) > 10:
+                print("Loose Connection")
+                return None
+
+            init_point = JointTrajectoryPoint()
+            init_point.positions = np.array(joints_pos)
+            init_point.time_from_start = rospy.Duration.from_sec(0.0)
+            init_point.velocities = [0 for _ in range(6)]
+            g.trajectory.points.insert(0, copy.deepcopy(init_point))
+
+            q_list = []
+            time_list = []
+            for point in g.trajectory.points:
+                q_list.append(point.positions)
+                time_list.append(point.time_from_start.to_sec())
+
+            print(q_list)
+
+            for i in range(len(q_list)-1):
+                q_before = np.array(q_list[i])
+                q_after  = np.array(q_list[i+1])
+                print(q_after, q_before)
+                time_before = time_list[i]
+                time_after = time_list[i+1]
+
+                diff_q = q_after - q_before
+                diff_time = time_after - time_before
+                print(f"diff_q:{diff_q}")
+                print(f"diff_time:{diff_time}")
+                speed = np.linalg.norm(diff_q)/diff_time
+                print(speed)
+                if speed >= speed_limit:
+                    raise Exception(f"Speed is too fast: {speed} < {speed_limit}")
+                    
+
+            self.client.send_goal(g)
+        except KeyboardInterrupt:
+            self.client.cancel_goal()
+            raise
+        except:
+            raise  
+
+    def execute_arm_speed(self, traj, speed_limit):
+        try:
+            self.client = actionlib.SimpleActionClient('follow_joint_trajectory', FollowJointTrajectoryAction)
+            print("Waiting for server...")
+            self.client.wait_for_server()
+            print("Connected to server")
+            """ Initialize """
+            self.move_arm_speed(traj, speed_limit)
+            print("Finish plan")
+
+        except KeyboardInterrupt:
+            rospy.signal_shutdown("KeyboardInterrupt")
+            raise      
+
+    def execute_arm_time(self, joints, movetime):
+        try:
+            self.client = actionlib.SimpleActionClient('follow_joint_trajectory', FollowJointTrajectoryAction)
+            print("Waiting for server...")
+            self.client.wait_for_server()
+            print("Connected to server")
+            """ Initialize """
+            self.move_arm_time(joints, movetime)
+            print("Finish plan")
+
+        except KeyboardInterrupt:
+            rospy.signal_shutdown("KeyboardInterrupt")
+            raise      
+# %%
 
